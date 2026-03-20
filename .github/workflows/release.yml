@@ -1,0 +1,217 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target_name }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            target_name: amd64
+            target_name_rpm: x86_64
+            musl_target: x86_64-unknown-linux-musl
+          - target: i686-unknown-linux-gnu
+            target_name: i386
+            target_name_rpm: i686
+            musl_target: i686-unknown-linux-musl
+          - target: aarch64-unknown-linux-gnu
+            target_name: arm64
+            target_name_rpm: aarch64
+            musl_target: aarch64-unknown-linux-musl
+          - target: armv7-unknown-linux-gnueabihf
+            target_name: armhf
+            target_name_rpm: ""
+            musl_target: armv7-unknown-linux-musleabihf
+          - target: armv5te-unknown-linux-gnueabi
+            target_name: armel
+            target_name_rpm: ""
+            musl_target: armv5te-unknown-linux-musleabi
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools
+        run: |
+          cargo install cross
+          cargo install cargo-deb
+          cargo install cargo-generate-rpm
+
+      - name: Install UPX
+        run: |
+          UPX_VERSION=$(grep -e '^upx_version =' Cargo.toml | sed -e 's/upx_version = "\(.*\)"/\1/')
+          wget https://github.com/upx/upx/releases/download/v${UPX_VERSION}/upx-${UPX_VERSION}-amd64_linux.tar.xz
+          tar -xJf upx-${UPX_VERSION}-amd64_linux.tar.xz
+          sudo mv upx-${UPX_VERSION}-amd64_linux/upx /usr/local/bin/
+
+      - name: Generate manpage
+        run: |
+          sudo apt-get install -y asciidoctor
+          mkdir -p target
+          asciidoctor -b manpage -o target/vpncloud.1 vpncloud.adoc
+          gzip -f target/vpncloud.1
+
+      - name: Get version
+        id: version
+        run: |
+          VERSION=$(grep -e '^version =' Cargo.toml | sed -e 's/version = "\(.*\)"/\1/')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Build packages
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          TARGET=${{ matrix.target }}
+          TARGET_NAME=${{ matrix.target_name }}
+          TARGET_DIR=target/$TARGET_NAME
+          MUSL_TARGET=${{ matrix.musl_target }}
+          MUSL_DIR=target/${TARGET_NAME}-musl
+
+          # Create dist directory
+          mkdir -p dist
+
+          # Build standard package
+          echo "Compiling for $TARGET_NAME"
+          cross build --release --target $TARGET --target-dir $TARGET_DIR
+          mkdir -p target/$TARGET/release
+          cp $TARGET_DIR/$TARGET/release/vpncloud target/$TARGET/release/
+
+          # Build deb package
+          echo "Building deb package"
+          cargo deb --no-build --no-strip --target $TARGET
+          mv target/$TARGET/debian/vpncloud_${VERSION}-1_$TARGET_NAME.deb dist/vpncloud_${VERSION}_${TARGET_NAME}.deb
+
+          # Build rpm package if applicable
+          if [ -n "${{ matrix.target_name_rpm }}" ]; then
+            echo "Building rpm package"
+            cargo generate-rpm --target $TARGET --target-dir $TARGET_DIR
+            mv $TARGET_DIR/$TARGET/generate-rpm/vpncloud-${VERSION}-1.${{ matrix.target_name_rpm }}.rpm dist/vpncloud_${VERSION}-1.${{ matrix.target_name_rpm }}.rpm
+          fi
+
+          # Build static binary with musl
+          echo "Compiling for $TARGET_NAME musl"
+          cross build --release --features installer --target $MUSL_TARGET --target-dir $MUSL_DIR
+          upx --lzma $MUSL_DIR/$MUSL_TARGET/release/vpncloud
+          cp $MUSL_DIR/$MUSL_TARGET/release/vpncloud dist/vpncloud_${VERSION}_static_${TARGET_NAME}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages-${{ matrix.target_name }}
+          path: dist/
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Get version
+        id: version
+        run: |
+          VERSION=$(grep -e '^version =' Cargo.toml | sed -e 's/version = "\(.*\)"/\1/')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          mkdir -p release
+          
+          # Copy all packages to release directory
+          find artifacts -name "*.deb" -exec cp {} release/ \;
+          find artifacts -name "*.rpm" -exec cp {} release/ \;
+          find artifacts -name "*static*" -exec cp {} release/ \;
+          
+          # Generate SHA256 checksums
+          cd release
+          sha256sum * > vpncloud_${VERSION}_SHA256SUMS.txt
+
+      - name: Check GPG key availability
+        id: gpg_check
+        run: |
+          if [ -n "${{ secrets.GPG_PRIVATE_KEY }}" ]; then
+            echo "available=true" >> $GITHUB_OUTPUT
+          else
+            echo "available=false" >> $GITHUB_OUTPUT
+            echo "::notice::GPG_PRIVATE_KEY not configured, skipping signature"
+          fi
+
+      - name: Import GPG key
+        if: steps.gpg_check.outputs.available == 'true'
+        uses: crazy-max/ghaction-import-gpg@v6
+        with:
+          gpg_private_key: ${{ secrets.GPG_PRIVATE_KEY }}
+          passphrase: ${{ secrets.GPG_PASSPHRASE }}
+
+      - name: Sign checksums
+        if: steps.gpg_check.outputs.available == 'true'
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          cd release
+          gpg --armor --output vpncloud_${VERSION}_SHA256SUMS.txt.asc --detach-sig vpncloud_${VERSION}_SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: VpnCloud ${{ steps.version.outputs.version }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            release/*.deb
+            release/*.rpm
+            release/*static*
+            release/*SHA256SUMS*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-crate:
+    name: Publish to crates.io
+    needs: release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Check crates.io token
+        id: crate_check
+        run: |
+          if [ -n "${{ secrets.CARGO_REGISTRY_TOKEN }}" ]; then
+            echo "available=true" >> $GITHUB_OUTPUT
+          else
+            echo "available=false" >> $GITHUB_OUTPUT
+            echo "::notice::CARGO_REGISTRY_TOKEN not configured, skipping crates.io publish"
+          fi
+
+      - name: Publish to crates.io
+        if: steps.crate_check.outputs.available == 'true'
+        run: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
