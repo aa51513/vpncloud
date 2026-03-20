@@ -10,9 +10,9 @@ use std::{
     fs::{self, File},
     io::{self, BufRead, BufReader, Cursor, Error as IoError, Read, Write},
     net::{Ipv4Addr, UdpSocket},
-    os::{unix::io::AsRawFd, fd::RawFd},
+    os::{fd::RawFd, unix::io::AsRawFd},
     str,
-    str::FromStr
+    str::FromStr,
 };
 
 use crate::{crypto, error::Error, util::MsgBuffer};
@@ -23,7 +23,7 @@ static TUNSETIFF: libc::c_ulong = 1074025674;
 #[derive(Copy, Clone)]
 struct IfReqDataAddr {
     af: libc::c_int,
-    addr: Ipv4Addr
+    addr: Ipv4Addr,
 }
 
 #[repr(C)]

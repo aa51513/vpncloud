@@ -34,6 +34,7 @@ const SPEED_TEST_TIME: f32 = 0.02;
 #[cfg(not(test))]
 const SPEED_TEST_TIME: f32 = 0.1;
 
+/// Interval in seconds for symmetric key rotation (2 minutes)
 const ROTATE_INTERVAL: usize = 120;
 
 pub trait Payload: Debug + PartialEq + Sized {
@@ -144,7 +145,7 @@ impl Crypto {
             Some(password) => {
                 pbkdf2::derive(
                     pbkdf2::PBKDF2_HMAC_SHA256,
-                    NonZeroU32::new(4096).unwrap(),
+                    NonZeroU32::new(600000).unwrap(),
                     SALT,
                     password.as_bytes(),
                     &mut bytes,

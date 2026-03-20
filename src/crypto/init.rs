@@ -81,9 +81,13 @@ pub const STAGE_PENG: u8 = 3;
 pub const WAITING_TO_CLOSE: u8 = 4;
 pub const CLOSING: u8 = 5;
 
+/// Maximum number of failed handshake retries before giving up (2 minutes at 1 retry/second)
 pub const MAX_FAILED_RETRIES: usize = 120;
 
 pub const SALTED_NODE_ID_HASH_LEN: usize = 20;
+
+/// Maximum field length in init messages to prevent DoS attacks
+const MAX_FIELD_LENGTH: usize = 65536; // 64KB
 pub type SaltedNodeIdHash = [u8; SALTED_NODE_ID_HASH_LEN];
 
 #[allow(clippy::large_enum_variant)]
@@ -221,6 +225,9 @@ impl InitMsg {
                     algorithms = Some(Algorithms { algorithm_speeds: algos, allow_unencrypted });
                 }
                 _ => {
+                    if field_len > MAX_FIELD_LENGTH {
+                        return Err(Error::Parse("Field length exceeds maximum allowed size"));
+                    }
                     let mut data = vec![0; field_len];
                     r.read_exact(&mut data).map_err(|_| Error::Parse("Init message too short"))?;
                 }
@@ -459,10 +466,8 @@ impl<P: Payload> InitState<P> {
     }
 
     fn derive_master_key(&self, algo: &'static Algorithm, privk: EcdhPrivateKey, pubk: &EcdhPublicKey) -> LessSafeKey {
-        agree_ephemeral(privk, pubk, |k| {
-            UnboundKey::new(algo, &k[..algo.key_len()]).map(LessSafeKey::new).unwrap()
-        })
-        .unwrap()
+        agree_ephemeral(privk, pubk, |k| UnboundKey::new(algo, &k[..algo.key_len()]).map(LessSafeKey::new).unwrap())
+            .unwrap()
     }
 
     fn create_ecdh_keypair(&self) -> (EcdhPrivateKey, EcdhPublicKey) {

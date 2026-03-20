@@ -101,7 +101,7 @@ impl<D: Device, P: Protocol, S: Socket, TS: TimeSource> GenericCloud<D, P, S, TS
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: &Config, socket: S, device: D, port_forwarding: Option<PortForwarding>, stats_file: Option<File>,
-    ) -> Self {
+    ) -> Result<Self, Error> {
         let (learning, broadcast) = match config.mode {
             Mode::Normal => match config.device_type {
                 Type::Tap => (true, true),
@@ -131,7 +131,7 @@ impl<D: Device, P: Protocol, S: Socket, TS: TimeSource> GenericCloud<D, P, S, TS
         let now = TS::now();
         let update_freq = config.get_keepalive() as u16;
         let node_id = random();
-        let crypto = Crypto::new(node_id, &config.crypto).unwrap();
+        let crypto = Crypto::new(node_id, &config.crypto)?;
         let beacon_key = config.beacon_password.as_ref().map(|s| s.as_bytes()).unwrap_or(&[]);
         let mut res = GenericCloud {
             node_id,
@@ -163,7 +163,7 @@ impl<D: Device, P: Protocol, S: Socket, TS: TimeSource> GenericCloud<D, P, S, TS
             _dummy_ts: PhantomData,
         };
         res.initialize();
-        res
+        Ok(res)
     }
 
     #[inline]
@@ -180,8 +180,10 @@ impl<D: Device, P: Protocol, S: Socket, TS: TimeSource> GenericCloud<D, P, S, TS
     #[inline]
     fn broadcast_msg(&mut self, type_: u8, msg: &mut MsgBuffer) -> Result<(), Error> {
         debug!("Broadcasting message type {}, {:?} bytes to {} peers", type_, msg.len(), self.peers.len());
+        // Reuse a single buffer for all peers to avoid repeated allocations
         let mut msg_data = MsgBuffer::new(100);
         for (addr, peer) in &mut self.peers {
+            // Reset buffer to original message state for each peer
             msg_data.set_start(msg.get_start());
             msg_data.set_length(msg.len());
             msg_data.message_mut().clone_from_slice(msg.message());

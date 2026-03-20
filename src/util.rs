@@ -24,14 +24,14 @@ pub type Time = i64;
 #[derive(Clone)]
 pub struct MsgBuffer {
     space_before: usize,
-    buffer: [u8; 65535],
+    buffer: Box<[u8; 65535]>,
     start: usize,
     end: usize,
 }
 
 impl MsgBuffer {
     pub fn new(space_before: usize) -> Self {
-        Self { buffer: [0; 65535], space_before, start: space_before, end: space_before }
+        Self { buffer: Box::new([0; 65535]), space_before, start: space_before, end: space_before }
     }
 
     pub fn get_start(&self) -> usize {

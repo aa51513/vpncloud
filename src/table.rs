@@ -25,17 +25,104 @@ struct ClaimEntry {
     timeout: Time,
 }
 
+/// A node in the binary trie for CIDR-based claim lookup
+struct TrieNode {
+    /// Claim entry at this node (if this node represents a complete prefix)
+    claim: Option<usize>, // Index into claims vector
+    /// Child nodes: [0] for bit 0, [1] for bit 1
+    children: [Option<Box<TrieNode>>; 2],
+}
+
+impl TrieNode {
+    fn new() -> Self {
+        Self { claim: None, children: [None, None] }
+    }
+}
+
+/// A binary trie for O(prefix_len) CIDR-based claim lookups
+struct ClaimTrie {
+    root: TrieNode,
+}
+
+impl ClaimTrie {
+    fn new() -> Self {
+        Self { root: TrieNode::new() }
+    }
+
+    /// Insert a claim with its index in the claims vector
+    fn insert(&mut self, range: &Range, claim_idx: usize) {
+        let addr = &range.base;
+        let prefix_len = range.prefix_len as usize;
+        let max_bits = (addr.len as usize) * 8;
+        let bits_to_check = std::cmp::min(prefix_len, max_bits);
+
+        let mut node = &mut self.root;
+        for bit_idx in 0..bits_to_check {
+            let byte_idx = bit_idx / 8;
+            let bit_pos = 7 - (bit_idx % 8); // MSB first
+            let bit = ((addr.data[byte_idx] >> bit_pos) & 1) as usize;
+
+            if node.children[bit].is_none() {
+                node.children[bit] = Some(Box::new(TrieNode::new()));
+            }
+            node = node.children[bit].as_mut().unwrap();
+        }
+        node.claim = Some(claim_idx);
+    }
+
+    /// Find the longest prefix match for the given address
+    /// Returns the index into the claims vector
+    fn longest_match(&self, addr: &Address) -> Option<usize> {
+        let mut node = &self.root;
+        let mut best_match = None;
+        let max_bits = (addr.len as usize) * 8;
+
+        if node.claim.is_some() {
+            best_match = node.claim;
+        }
+
+        for bit_idx in 0..max_bits {
+            let byte_idx = bit_idx / 8;
+            let bit_pos = 7 - (bit_idx % 8); // MSB first
+            let bit = ((addr.data[byte_idx] >> bit_pos) & 1) as usize;
+
+            match &node.children[bit] {
+                Some(child) => {
+                    node = child;
+                    if node.claim.is_some() {
+                        best_match = node.claim;
+                    }
+                }
+                None => break,
+            }
+        }
+        best_match
+    }
+
+    fn clear(&mut self) {
+        self.root = TrieNode::new();
+    }
+}
+
 pub struct ClaimTable<TS: TimeSource> {
     cache: HashMap<Address, CacheValue, Hash>,
     cache_timeout: Duration,
     claims: Vec<ClaimEntry>,
     claim_timeout: Duration,
+    trie: ClaimTrie,
     _dummy: PhantomData<TS>,
 }
 
 impl<TS: TimeSource> ClaimTable<TS> {
     pub fn new(cache_timeout: Duration, claim_timeout: Duration) -> Self {
-        Self { cache: HashMap::default(), cache_timeout, claims: vec![], claim_timeout, _dummy: PhantomData }
+        Self {
+            cache: HashMap::default(),
+            cache_timeout,
+            claims: vec![],
+            claim_timeout,
+            trie: ClaimTrie::new(),
+            _dummy: PhantomData,
+        }
     }
 
     pub fn cache(&mut self, addr: Address, peer: SocketAddr) {
@@ -96,16 +183,9 @@ impl<TS: TimeSource> ClaimTable<TS> {
         if let Some(entry) = self.cache.get(&addr) {
             return Some(entry.peer);
         }
-        // COLD PATH
-        let mut found = None;
-        let mut prefix_len = -1;
-        for entry in &self.claims {
-            if entry.claim.prefix_len as isize > prefix_len && entry.claim.matches(addr) {
-                found = Some(entry);
-                prefix_len = entry.claim.prefix_len as isize;
-            }
-        }
-        if let Some(entry) = found {
+        // COLD PATH - Use trie for O(prefix_len) lookup instead of O(n) linear scan
+        if let Some(claim_idx) = self.trie.longest_match(&addr) {
+            let entry = &self.claims[claim_idx];
             self.cache.insert(
                 addr,
                 CacheValue { peer: entry.peer, timeout: min(TS::now() + self.cache_timeout as Time, entry.timeout) },
@@ -119,6 +199,16 @@ impl<TS: TimeSource> ClaimTable<TS> {
         let now = TS::now();
         self.cache.retain(|_, v| v.timeout >= now);
         self.claims.retain(|e| e.timeout >= now);
+        // Rebuild trie after claims cleanup
+        self.rebuild_trie();
+    }
+
+    /// Rebuild the trie from the current claims vector
+    fn rebuild_trie(&mut self) {
+        self.trie.clear();
+        for (idx, entry) in self.claims.iter().enumerate() {
+            self.trie.insert(&entry.claim, idx);
+        }
     }
 
     pub fn cache_len(&self) -> usize {

@@ -81,26 +81,44 @@ pub struct TrafficStats {
 impl TrafficStats {
     #[inline]
     pub fn count_out_traffic(&mut self, peer: SocketAddr, bytes: usize) {
-        // HOT PATH
-        self.peers.entry(peer).or_default().count_out(bytes);
+        // HOT PATH - Use get_mut first for fast path, then entry only on cache miss
+        if let Some(entry) = self.peers.get_mut(&peer) {
+            entry.count_out(bytes);
+        } else {
+            self.peers.entry(peer).or_default().count_out(bytes);
+        }
     }
 
     #[inline]
     pub fn count_in_traffic(&mut self, peer: SocketAddr, bytes: usize) {
-        // HOT PATH
-        self.peers.entry(peer).or_default().count_in(bytes);
+        // HOT PATH - Use get_mut first for fast path, then entry only on cache miss
+        if let Some(entry) = self.peers.get_mut(&peer) {
+            entry.count_in(bytes);
+        } else {
+            self.peers.entry(peer).or_default().count_in(bytes);
+        }
     }
 
     #[inline]
     pub fn count_out_payload(&mut self, remote: Address, local: Address, bytes: usize) {
-        // HOT PATH
-        self.payload.entry((remote, local)).or_default().count_out(bytes);
+        // HOT PATH - Use get_mut first for fast path, then entry only on cache miss
+        let key = (remote, local);
+        if let Some(entry) = self.payload.get_mut(&key) {
+            entry.count_out(bytes);
+        } else {
+            self.payload.entry(key).or_default().count_out(bytes);
+        }
     }
 
     #[inline]
     pub fn count_in_payload(&mut self, remote: Address, local: Address, bytes: usize) {
-        // HOT PATH
-        self.payload.entry((remote, local)).or_default().count_in(bytes);
+        // HOT PATH - Use get_mut first for fast path, then entry only on cache miss
+        let key = (remote, local);
+        if let Some(entry) = self.payload.get_mut(&key) {
+            entry.count_in(bytes);
+        } else {
+            self.payload.entry(key).or_default().count_in(bytes);
+        }
     }
 
     pub fn count_invalid_protocol(&mut self, bytes: usize) {

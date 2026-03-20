@@ -3,7 +3,6 @@
 // This software is licensed under GPL-3 or newer (see LICENSE.md)
 
 use crate::{error::Error, types::Address};
-use std::io::{Cursor, Read};
 
 pub trait Protocol: Sized {
     fn parse(_: &[u8]) -> Result<(Address, Address), Error>;
@@ -23,20 +22,26 @@ impl Protocol for Frame {
     /// # Errors
     /// This method will fail when the given data is not a valid ethernet frame.
     fn parse(data: &[u8]) -> Result<(Address, Address), Error> {
-        // HOT PATH
-        let mut cursor = Cursor::new(data);
+        // HOT PATH - Direct array indexing for better performance
+        if data.len() < 14 {
+            return Err(Error::Parse("Frame is too short"));
+        }
         let mut src = [0; 16];
         let mut dst = [0; 16];
-        let mut proto = [0; 2];
-        cursor
-            .read_exact(&mut dst[..6])
-            .and_then(|_| cursor.read_exact(&mut src[..6]))
-            .and_then(|_| cursor.read_exact(&mut proto))
-            .map_err(|_| Error::Parse("Frame is too short"))?;
-        if proto == [0x81, 0x00] {
+        // Copy destination MAC (bytes 0-5)
+        dst[..6].copy_from_slice(&data[0..6]);
+        // Copy source MAC (bytes 6-11)
+        src[..6].copy_from_slice(&data[6..12]);
+        // Check for VLAN tag (bytes 12-13)
+        if data[12] == 0x81 && data[13] == 0x00 {
+            if data.len() < 18 {
+                return Err(Error::Parse("Vlan frame is too short"));
+            }
+            // Shift MAC addresses to make room for VLAN tag
             src.copy_within(..6, 2);
             dst.copy_within(..6, 2);
-            cursor.read_exact(&mut src[..2]).map_err(|_| Error::Parse("Vlan frame is too short"))?;
+            // Read VLAN tag (bytes 14-15)
+            src[..2].copy_from_slice(&data[14..16]);
             src[0] &= 0x0f; // restrict vlan id to 12 bits
             dst[..2].copy_from_slice(&src[..2]);
             if src[0..1] == [0, 0] {

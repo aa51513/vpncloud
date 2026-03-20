@@ -190,8 +190,10 @@ fn run<P: Protocol, S: Socket>(config: Config, socket: S) {
             Some(file)
         }
     };
-    let mut cloud =
-        GenericCloud::<TunTapDevice, P, S, SystemTimeSource>::new(&config, socket, device, port_forwarding, stats_file);
+    let mut cloud = try_fail!(
+        GenericCloud::<TunTapDevice, P, S, SystemTimeSource>::new(&config, socket, device, port_forwarding, stats_file),
+        "Failed to create VPN cloud: {}"
+    );
     for mut addr in config.peers {
         if addr.find(':').unwrap_or(0) <= addr.find(']').unwrap_or(0) {
             // : not present or only in IPv6 address

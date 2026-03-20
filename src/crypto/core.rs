@@ -55,8 +55,11 @@ use std::{
 
 use crate::{error::Error, util::MsgBuffer};
 
+/// Nonce length for AES-GCM and ChaCha20-Poly1305 (96 bits)
 const NONCE_LEN: usize = 12;
+/// Authentication tag length for AES-GCM and ChaCha20-Poly1305 (128 bits)
 pub const TAG_LEN: usize = 16;
+/// Extra bytes for encrypted messages (nonce + tag)
 pub const EXTRA_LEN: usize = 8;
 
 fn random_data(size: usize) -> Vec<u8> {
