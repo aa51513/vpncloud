@@ -21,6 +21,7 @@ use std::{fmt::Debug, io::Read, num::NonZeroU32, sync::Arc, time::Duration};
 const SALT: &[u8; 32] = b"vpncloudVPNCLOUDvpncl0udVpnCloud";
 const INIT_MESSAGE_FIRST_BYTE: u8 = 0xff;
 const MESSAGE_TYPE_ROTATION: u8 = 0x10;
+const DEFAULT_PBKDF2_ITERATIONS: u32 = 4096;
 
 pub type Ed25519PublicKey = [u8; ED25519_PUBLIC_KEY_LEN];
 pub type EcdhPublicKey = UnparsedPublicKey<SmallVec<[u8; 96]>>;
@@ -56,6 +57,7 @@ pub struct Config {
     pub public_key: Option<String>,
     pub trusted_keys: Vec<String>,
     pub algorithms: Vec<String>,
+    pub pbkdf2_iterations: Option<u32>,
 }
 
 pub struct Crypto {
@@ -95,7 +97,8 @@ impl Crypto {
                 Self::parse_private_key(priv_key)?
             }
         } else if let Some(password) = &config.password {
-            Self::keypair_from_password(password)
+            let iterations = config.pbkdf2_iterations.unwrap_or(DEFAULT_PBKDF2_ITERATIONS);
+            Self::keypair_from_password(password, iterations)
         } else {
             return Err(Error::InvalidConfig("Either private_key or password must be set"));
         };
@@ -135,7 +138,7 @@ impl Crypto {
         })
     }
 
-    pub fn generate_keypair(password: Option<&str>) -> (String, String) {
+    pub fn generate_keypair(password: Option<&str>, iterations: u32) -> (String, String) {
         let mut bytes = [0; 32];
         match password {
             None => {
@@ -145,7 +148,7 @@ impl Crypto {
             Some(password) => {
                 pbkdf2::derive(
                     pbkdf2::PBKDF2_HMAC_SHA256,
-                    NonZeroU32::new(600000).unwrap(),
+                    NonZeroU32::new(iterations).unwrap(),
                     SALT,
                     password.as_bytes(),
                     &mut bytes,
@@ -158,9 +161,9 @@ impl Crypto {
         (privkey, pubkey)
     }
 
-    fn keypair_from_password(password: &str) -> Ed25519KeyPair {
+    fn keypair_from_password(password: &str, iterations: u32) -> Ed25519KeyPair {
         let mut key = [0; 32];
-        pbkdf2::derive(pbkdf2::PBKDF2_HMAC_SHA256, NonZeroU32::new(4096).unwrap(), SALT, password.as_bytes(), &mut key);
+        pbkdf2::derive(pbkdf2::PBKDF2_HMAC_SHA256, NonZeroU32::new(iterations).unwrap(), SALT, password.as_bytes(), &mut key);
         Ed25519KeyPair::from_seed_unchecked(&key).unwrap()
     }
 

@@ -94,7 +94,7 @@ fn configure_crypto(config: &mut Config, mode: usize, theme: &ColorfulTheme) -> 
             .interact()?
         {
             0 => {
-                let (priv_key, pub_key) = Crypto::generate_keypair(None);
+                let (priv_key, pub_key) = Crypto::generate_keypair(None, 4096);
                 info!("Private key: {}", priv_key);
                 info!("Public key: {}", pub_key);
                 (priv_key, pub_key)
@@ -113,7 +113,7 @@ fn configure_crypto(config: &mut Config, mode: usize, theme: &ColorfulTheme) -> 
                     .with_prompt("Password")
                     .with_confirmation("Confirm password", "Passwords do not match")
                     .interact()?;
-                let (priv_key, pub_key) = Crypto::generate_keypair(Some(&password));
+                let (priv_key, pub_key) = Crypto::generate_keypair(Some(&password), 4096);
                 info!("Private key: {}", priv_key);
                 info!("Public key: {}", pub_key);
                 (priv_key, pub_key)

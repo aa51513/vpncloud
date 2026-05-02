@@ -190,6 +190,9 @@ impl Config {
         if !file.crypto.algorithms.is_empty() {
             self.crypto.algorithms = file.crypto.algorithms.clone();
         }
+        if let Some(val) = file.crypto.pbkdf2_iterations {
+            self.crypto.pbkdf2_iterations = Some(val);
+        }
         if let Some(val) = file.hook {
             self.hook = Some(val)
         }
@@ -289,6 +292,9 @@ impl Config {
         self.crypto.trusted_keys.append(&mut args.trusted_keys);
         if !args.algorithms.is_empty() {
             self.crypto.algorithms = args.algorithms.clone();
+        }
+        if let Some(val) = args.pbkdf2_iterations {
+            self.crypto.pbkdf2_iterations = Some(val);
         }
         for s in args.hook {
             if s.contains(':') {
@@ -413,6 +419,10 @@ pub struct Args {
     /// Algorithms to allow
     #[structopt(long = "algorithm", alias = "algo", use_delimiter=true, case_insensitive = true, possible_values=&["plain", "aes128", "aes256", "chacha20"])]
     pub algorithms: Vec<String>,
+
+    /// PBKDF2 iteration count for password-based key derivation (default: 4096)
+    #[structopt(long)]
+    pub pbkdf2_iterations: Option<u32>,
 
     /// The local subnets to claim (IP or IP/prefix)
     #[structopt(long = "claim", use_delimiter = true)]
@@ -542,6 +552,10 @@ pub enum Command {
         /// The shared password to encrypt all traffic
         #[structopt(short, long, env)]
         password: Option<String>,
+
+        /// PBKDF2 iteration count for password-based key derivation (default: 4096)
+        #[structopt(long)]
+        pbkdf2_iterations: Option<u32>,
     },
 
     /// Run a websocket proxy

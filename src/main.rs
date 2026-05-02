@@ -250,8 +250,9 @@ fn main() {
     });
     if let Some(cmd) = args.cmd {
         match cmd {
-            Command::GenKey { password } => {
-                let (privkey, pubkey) = Crypto::generate_keypair(password.as_deref());
+            Command::GenKey { password, pbkdf2_iterations } => {
+                let iterations = pbkdf2_iterations.unwrap_or(4096);
+                let (privkey, pubkey) = Crypto::generate_keypair(password.as_deref(), iterations);
                 println!("Private key: {}\nPublic key: {}\n", privkey, pubkey);
                 println!(
                     "Attention: Keep the private key secret and use only the public key on other nodes to establish trust."
