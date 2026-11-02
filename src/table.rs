@@ -40,24 +40,29 @@ impl TrieNode {
 }
 
 /// A binary trie for O(prefix_len) CIDR-based claim lookups
+/// There is one root per address length, so claims of one address family can never match addresses of another
 struct ClaimTrie {
-    root: TrieNode,
+    roots: HashMap<u8, TrieNode>,
 }
 
 impl ClaimTrie {
     fn new() -> Self {
-        Self { root: TrieNode::new() }
+        Self { roots: HashMap::default() }
     }
 
     /// Insert a claim with its index in the claims vector
+    /// The first claim inserted for a prefix wins, which is the same priority the previous linear scan had
     fn insert(&mut self, range: &Range, claim_idx: usize) {
         let addr = &range.base;
         let prefix_len = range.prefix_len as usize;
         let max_bits = (addr.len as usize) * 8;
-        let bits_to_check = std::cmp::min(prefix_len, max_bits);
+        if prefix_len > max_bits {
+            // Invalid prefix for this address type, never matches (same as the previous linear scan)
+            return;
+        }
 
-        let mut node = &mut self.root;
-        for bit_idx in 0..bits_to_check {
+        let mut node = self.roots.entry(addr.len).or_insert_with(TrieNode::new);
+        for bit_idx in 0..prefix_len {
             let byte_idx = bit_idx / 8;
             let bit_pos = 7 - (bit_idx % 8); // MSB first
             let bit = ((addr.data[byte_idx] >> bit_pos) & 1) as usize;
@@ -67,19 +72,17 @@ impl ClaimTrie {
             }
             node = node.children[bit].as_mut().unwrap();
         }
-        node.claim = Some(claim_idx);
+        if node.claim.is_none() {
+            node.claim = Some(claim_idx);
+        }
     }
 
     /// Find the longest prefix match for the given address
     /// Returns the index into the claims vector
     fn longest_match(&self, addr: &Address) -> Option<usize> {
-        let mut node = &self.root;
-        let mut best_match = None;
+        let mut node = self.roots.get(&addr.len)?;
+        let mut best_match = node.claim;
         let max_bits = (addr.len as usize) * 8;
-
-        if node.claim.is_some() {
-            best_match = node.claim;
-        }
 
         for bit_idx in 0..max_bits {
             let byte_idx = bit_idx / 8;
@@ -100,7 +103,7 @@ impl ClaimTrie {
     }
 
     fn clear(&mut self) {
-        self.root = TrieNode::new();
+        self.roots.clear();
     }
 }
 
@@ -110,6 +113,7 @@ pub struct ClaimTable<TS: TimeSource> {
     claims: Vec<ClaimEntry>,
     claim_timeout: Duration,
     trie: ClaimTrie,
+    trie_dirty: bool,
     _dummy: PhantomData<TS>,
 }
 
@@ -121,6 +125,7 @@ impl<TS: TimeSource> ClaimTable<TS> {
             claims: vec![],
             claim_timeout,
             trie: ClaimTrie::new(),
+            trie_dirty: false,
             _dummy: PhantomData,
         }
     }
@@ -151,6 +156,9 @@ impl<TS: TimeSource> ClaimTable<TS> {
                 }
             }
         }
+        if removed_claim || !claims.is_empty() {
+            self.trie_dirty = true;
+        }
         for claim in claims {
             self.claims.push(ClaimEntry { peer, claim, timeout: TS::now() + self.claim_timeout as Time })
         }
@@ -165,10 +173,15 @@ impl<TS: TimeSource> ClaimTable<TS> {
     }
 
     pub fn remove_claims(&mut self, peer: SocketAddr) {
+        let mut removed_claim = false;
         for entry in &mut self.claims {
             if entry.peer == peer {
-                entry.timeout = 0
+                entry.timeout = 0;
+                removed_claim = true;
             }
+        }
+        if removed_claim {
+            self.trie_dirty = true;
         }
         for entry in self.cache.values_mut() {
             if entry.peer == peer {
@@ -198,9 +211,15 @@ impl<TS: TimeSource> ClaimTable<TS> {
     pub fn housekeep(&mut self) {
         let now = TS::now();
         self.cache.retain(|_, v| v.timeout >= now);
+        let claims_before = self.claims.len();
         self.claims.retain(|e| e.timeout >= now);
-        // Rebuild trie after claims cleanup
-        self.rebuild_trie();
+        if self.claims.len() != claims_before {
+            self.trie_dirty = true;
+        }
+        // Only rebuild the trie when the claims actually changed
+        if self.trie_dirty {
+            self.rebuild_trie();
+        }
     }
 
     /// Rebuild the trie from the current claims vector
@@ -209,6 +228,7 @@ impl<TS: TimeSource> ClaimTable<TS> {
         for (idx, entry) in self.claims.iter().enumerate() {
             self.trie.insert(&entry.claim, idx);
         }
+        self.trie_dirty = false;
     }
 
     pub fn cache_len(&self) -> usize {
@@ -336,13 +356,54 @@ mod tests {
     }
 
     #[test]
-    fn trie_insert_overwrite() {
+    fn trie_insert_keeps_first_claim() {
         let mut trie = ClaimTrie::new();
         trie.insert(&ipv4_range("10.0.0.0/8"), 0);
         trie.insert(&ipv4_range("10.0.0.0/8"), 1); // same prefix, different index
 
-        // Last insert wins
-        assert_eq!(trie.longest_match(&ipv4_addr("10.1.2.3")), Some(1));
+        // First insert wins, same priority as the previous linear scan
+        assert_eq!(trie.longest_match(&ipv4_addr("10.1.2.3")), Some(0));
+    }
+
+    #[test]
+    fn trie_no_match_across_address_families() {
+        // IPv6 default route must not match IPv4 addresses
+        let mut trie6 = ClaimTrie::new();
+        trie6.insert(&Range::from_str("::/0").unwrap(), 0);
+        assert_eq!(trie6.longest_match(&ipv4_addr("10.1.2.3")), None);
+
+        // IPv4 default route must not match IPv6 addresses
+        let mut trie4 = ClaimTrie::new();
+        trie4.insert(&ipv4_range("0.0.0.0/0"), 0);
+        assert_eq!(trie4.longest_match(&Address::from_str("2001:db8::1").unwrap()), None);
+    }
+
+    #[test]
+    fn trie_zero_length_claim_matches_nothing() {
+        let mut trie = ClaimTrie::new();
+        trie.insert(&Range { base: Address { data: [0; 16], len: 0 }, prefix_len: 0 }, 0);
+
+        assert_eq!(trie.longest_match(&ipv4_addr("10.1.2.3")), None);
+        assert_eq!(trie.longest_match(&Address::from_str("2001:db8::1").unwrap()), None);
+    }
+
+    #[test]
+    fn trie_invalid_prefix_len_never_matches() {
+        let mut trie = ClaimTrie::new();
+        trie.insert(&ipv4_range("10.0.0.0/64"), 0);
+
+        assert_eq!(trie.longest_match(&ipv4_addr("10.0.0.0")), None);
+    }
+
+    #[test]
+    fn trie_ipv6_longest_prefix() {
+        let mut trie = ClaimTrie::new();
+        trie.insert(&Range::from_str("2001:db8::/32").unwrap(), 0);
+        trie.insert(&Range::from_str("2001:db8:1::/48").unwrap(), 1);
+
+        assert_eq!(trie.longest_match(&Address::from_str("2001:db8::5").unwrap()), Some(0));
+        assert_eq!(trie.longest_match(&Address::from_str("2001:db8:1::5").unwrap()), Some(1));
+        assert_eq!(trie.longest_match(&Address::from_str("2001:db9::1").unwrap()), None);
     }
 
     #[test]

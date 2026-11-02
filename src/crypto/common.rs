@@ -98,7 +98,7 @@ impl Crypto {
             }
         } else if let Some(password) = &config.password {
             let iterations = config.pbkdf2_iterations.unwrap_or(DEFAULT_PBKDF2_ITERATIONS);
-            Self::keypair_from_password(password, iterations)
+            Self::keypair_from_password(password, iterations)?
         } else {
             return Err(Error::InvalidConfig("Either private_key or password must be set"));
         };
@@ -138,7 +138,7 @@ impl Crypto {
         })
     }
 
-    pub fn generate_keypair(password: Option<&str>, iterations: u32) -> (String, String) {
+    pub fn generate_keypair(password: Option<&str>, iterations: u32) -> Result<(String, String), Error> {
         let mut bytes = [0; 32];
         match password {
             None => {
@@ -148,7 +148,7 @@ impl Crypto {
             Some(password) => {
                 pbkdf2::derive(
                     pbkdf2::PBKDF2_HMAC_SHA256,
-                    NonZeroU32::new(iterations).unwrap(),
+                    Self::pbkdf2_iterations(iterations)?,
                     SALT,
                     password.as_bytes(),
                     &mut bytes,
@@ -158,13 +158,24 @@ impl Crypto {
         let keypair = Ed25519KeyPair::from_seed_unchecked(&bytes).unwrap();
         let privkey = to_base62(&bytes);
         let pubkey = to_base62(keypair.public_key().as_ref());
-        (privkey, pubkey)
+        Ok((privkey, pubkey))
     }
 
-    fn keypair_from_password(password: &str, iterations: u32) -> Ed25519KeyPair {
+    /// Validates the configured PBKDF2 iteration count instead of panicking on invalid values
+    fn pbkdf2_iterations(iterations: u32) -> Result<NonZeroU32, Error> {
+        NonZeroU32::new(iterations).ok_or(Error::InvalidConfig("pbkdf2 iterations must be greater than 0"))
+    }
+
+    fn keypair_from_password(password: &str, iterations: u32) -> Result<Ed25519KeyPair, Error> {
         let mut key = [0; 32];
-        pbkdf2::derive(pbkdf2::PBKDF2_HMAC_SHA256, NonZeroU32::new(iterations).unwrap(), SALT, password.as_bytes(), &mut key);
-        Ed25519KeyPair::from_seed_unchecked(&key).unwrap()
+        pbkdf2::derive(
+            pbkdf2::PBKDF2_HMAC_SHA256,
+            Self::pbkdf2_iterations(iterations)?,
+            SALT,
+            password.as_bytes(),
+            &mut key,
+        );
+        Ok(Ed25519KeyPair::from_seed_unchecked(&key).unwrap())
     }
 
     fn parse_keypair(privkey: &str, pubkey: &str) -> Result<Ed25519KeyPair, Error> {
